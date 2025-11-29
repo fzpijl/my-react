@@ -1,34 +1,34 @@
-import { Fiber, MyReactElement } from '../types';
+import { Fiber, MyReactElement, Hook } from '../types';
 
 /**
  * MyReact: A simplified implementation of React's core algorithm.
  * 
- * Core Concepts:
- * 1. createElement: Creates a Virtual DOM object.
- * 2. render: Starts the reconciliation process.
- * 3. Concurrent Mode / Fiber: Breaks work into units to avoid blocking the main thread.
- * 4. Reconciliation: Diffing the old fiber tree with the new one.
- * 5. Commit: Applying changes to the real DOM.
- * 6. Hooks: Managing state within fibers.
+ * Includes:
+ * - Fiber Architecture
+ * - Render & Commit Phases
+ * - Reconciliation (Diffing)
+ * - Hooks (useState, useEffect)
+ * - Functional Components
  */
 
-// Global State for Work Loop
+// --- Global State ---
 let nextUnitOfWork: Fiber | null = null;
 let currentRoot: Fiber | null = null;
 let wipRoot: Fiber | null = null; // Work In Progress Root
 let deletions: Fiber[] = [];
 
-// Global State for Hooks
+// --- Hooks State ---
 let wipFiber: Fiber | null = null;
 let hookIndex: number = 0;
 
-// 1. Create Element (Virtual DOM)
+// --- 1. createElement (Virtual DOM) ---
 function createElement(type: string | Function, props: any, ...children: any[]): MyReactElement {
   return {
     type,
     props: {
       ...props,
-      children: children.map(child =>
+      // React handles "text" simply, but we flatten arrays to support .map() in JSX
+      children: children.flat().map(child =>
         typeof child === "object"
           ? child
           : createTextElement(child)
@@ -37,7 +37,7 @@ function createElement(type: string | Function, props: any, ...children: any[]):
   };
 }
 
-function createTextElement(text: string): MyReactElement {
+function createTextElement(text: string | number): MyReactElement {
   return {
     type: "TEXT_ELEMENT",
     props: {
@@ -47,7 +47,7 @@ function createTextElement(text: string): MyReactElement {
   };
 }
 
-// 2. DOM Manipulation Helpers
+// --- 2. DOM Manipulation ---
 function createDom(fiber: Fiber): HTMLElement | Text {
   const dom =
     fiber.type === "TEXT_ELEMENT"
@@ -60,30 +60,22 @@ function createDom(fiber: Fiber): HTMLElement | Text {
 }
 
 const isEvent = (key: string) => key.startsWith("on");
-const isProperty = (key: string) =>
-  key !== "children" && !isEvent(key);
-const isNew = (prev: any, next: any) => (key: string) =>
-  prev[key] !== next[key];
+const isProperty = (key: string) => key !== "children" && !isEvent(key);
+const isNew = (prev: any, next: any) => (key: string) => prev[key] !== next[key];
 const isGone = (prev: any, next: any) => (key: string) => !(key in next);
+const isStyle = (key: string) => key === "style";
 
 function updateDom(dom: any, prevProps: any, nextProps: any) {
-  // Remove old or changed event listeners
+  // 1. Remove old event listeners
   Object.keys(prevProps)
     .filter(isEvent)
-    .filter(
-      key =>
-        !(key in nextProps) ||
-        isNew(prevProps, nextProps)(key)
-    )
+    .filter(key => !(key in nextProps) || isNew(prevProps, nextProps)(key))
     .forEach(name => {
       const eventType = name.toLowerCase().substring(2);
-      dom.removeEventListener(
-        eventType,
-        prevProps[name]
-      );
+      dom.removeEventListener(eventType, prevProps[name]);
     });
 
-  // Remove old properties
+  // 2. Remove old properties
   Object.keys(prevProps)
     .filter(isProperty)
     .filter(isGone(prevProps, nextProps))
@@ -91,33 +83,39 @@ function updateDom(dom: any, prevProps: any, nextProps: any) {
       dom[name] = "";
     });
 
-  // Set new or changed properties
+  // 3. Set new or changed properties
   Object.keys(nextProps)
     .filter(isProperty)
     .filter(isNew(prevProps, nextProps))
     .forEach(name => {
-      dom[name] = nextProps[name];
+      if (name === "style" && typeof nextProps[name] === "object") {
+        // Handle style objects like { color: 'red' }
+        Object.assign(dom.style, nextProps[name]);
+      } else {
+        dom[name] = nextProps[name];
+      }
     });
 
-  // Add event listeners
+  // 4. Add new event listeners
   Object.keys(nextProps)
     .filter(isEvent)
     .filter(isNew(prevProps, nextProps))
     .forEach(name => {
       const eventType = name.toLowerCase().substring(2);
-      dom.addEventListener(
-        eventType,
-        nextProps[name]
-      );
+      dom.addEventListener(eventType, nextProps[name]);
     });
 }
 
-// 3. Commit Phase (Apply changes to DOM)
+// --- 3. Commit Phase ---
 function commitRoot() {
   deletions.forEach(commitWork);
   if (wipRoot && wipRoot.child) {
-      commitWork(wipRoot.child);
+    commitWork(wipRoot.child);
   }
+  
+  // After DOM manipulation, we run effects
+  commitEffectHooks();
+
   currentRoot = wipRoot;
   wipRoot = null;
 }
@@ -127,29 +125,20 @@ function commitWork(fiber: Fiber | undefined) {
     return;
   }
 
-  // Find the nearest DOM parent (functional components don't have DOM nodes)
+  // Find nearest DOM parent (functional components don't have DOM)
   let domParentFiber = fiber.parent;
   while (!domParentFiber?.dom) {
     domParentFiber = domParentFiber?.parent;
   }
   const domParent = domParentFiber.dom;
 
-  if (
-    fiber.effectTag === "PLACEMENT" &&
-    fiber.dom != null
-  ) {
+  if (fiber.effectTag === "PLACEMENT" && fiber.dom != null) {
     domParent.appendChild(fiber.dom);
-  } else if (
-    fiber.effectTag === "UPDATE" &&
-    fiber.dom != null
-  ) {
-    updateDom(
-      fiber.dom,
-      fiber.alternate?.props,
-      fiber.props
-    );
+  } else if (fiber.effectTag === "UPDATE" && fiber.dom != null) {
+    updateDom(fiber.dom, fiber.alternate?.props, fiber.props);
   } else if (fiber.effectTag === "DELETION") {
     commitDeletion(fiber, domParent);
+    return; // Stop processing children of deleted node
   }
 
   commitWork(fiber.child);
@@ -160,14 +149,43 @@ function commitDeletion(fiber: Fiber, domParent: Node) {
   if (fiber.dom) {
     domParent.removeChild(fiber.dom);
   } else {
-    // If fiber is a function component, delete child
+    // Recursively find child with DOM node
     if (fiber.child) {
-        commitDeletion(fiber.child, domParent);
+      commitDeletion(fiber.child, domParent);
     }
   }
 }
 
-// 4. Render (Entry point)
+// Run useEffect hooks after commit
+function commitEffectHooks() {
+    function runEffects(fiber: Fiber | undefined) {
+        if (!fiber) return;
+
+        if (fiber.hooks) {
+            fiber.hooks.forEach(hook => {
+                if (hook.tag === 'EFFECT' && hook.hasChanged) {
+                    // Run cleanup from previous render if it exists
+                    if (hook.cancel) {
+                        hook.cancel();
+                    }
+                    // Run new effect and store cleanup
+                    if (hook.callback) {
+                        hook.cancel = hook.callback();
+                    }
+                }
+            });
+        }
+        
+        runEffects(fiber.child);
+        runEffects(fiber.sibling);
+    }
+
+    if (wipRoot && wipRoot.child) {
+        runEffects(wipRoot.child);
+    }
+}
+
+// --- 4. Render Entry ---
 function render(element: MyReactElement, container: HTMLElement) {
   wipRoot = {
     dom: container,
@@ -180,7 +198,7 @@ function render(element: MyReactElement, container: HTMLElement) {
   nextUnitOfWork = wipRoot;
 }
 
-// 5. Work Loop (Concurrent Mode)
+// --- 5. Work Loop ---
 function workLoop(deadline: IdleDeadline) {
   let shouldYield = false;
   while (nextUnitOfWork && !shouldYield) {
@@ -195,16 +213,22 @@ function workLoop(deadline: IdleDeadline) {
   requestIdleCallback(workLoop);
 }
 
-// Helper to start the loop in browser
-if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+// Browser polyfill for requestIdleCallback
+if (typeof window !== 'undefined') {
+    const requestIdleCallback = window.requestIdleCallback || function(cb: any) {
+        return setTimeout(() => {
+            cb({
+                timeRemaining: () => 1,
+                didTimeout: false
+            });
+        }, 1);
+    };
     requestIdleCallback(workLoop);
 }
 
-
-// 6. Perform Unit of Work & Reconciliation
+// --- 6. Reconciliation ---
 function performUnitOfWork(fiber: Fiber): Fiber | null {
-  const isFunctionComponent =
-    fiber.type instanceof Function;
+  const isFunctionComponent = fiber.type instanceof Function;
 
   if (isFunctionComponent) {
     updateFunctionComponent(fiber);
@@ -212,7 +236,6 @@ function performUnitOfWork(fiber: Fiber): Fiber | null {
     updateHostComponent(fiber);
   }
 
-  // Return next unit of work (Child -> Sibling -> Uncle)
   if (fiber.child) {
     return fiber.child;
   }
@@ -230,17 +253,16 @@ function updateFunctionComponent(fiber: Fiber) {
   wipFiber = fiber;
   hookIndex = 0;
   wipFiber.hooks = [];
-  
-  // Run the component function to get children
+
   const children = [(fiber.type as Function)(fiber.props)];
-  reconcileChildren(fiber, children);
+  reconcileChildren(fiber, children.flat());
 }
 
 function updateHostComponent(fiber: Fiber) {
   if (!fiber.dom) {
     fiber.dom = createDom(fiber);
   }
-  reconcileChildren(fiber, fiber.props.children);
+  reconcileChildren(fiber, fiber.props.children.flat());
 }
 
 function reconcileChildren(wipFiber: Fiber, elements: MyReactElement[]) {
@@ -248,17 +270,11 @@ function reconcileChildren(wipFiber: Fiber, elements: MyReactElement[]) {
   let oldFiber = wipFiber.alternate && wipFiber.alternate.child;
   let prevSibling: Fiber | null = null;
 
-  while (
-    index < elements.length ||
-    oldFiber != null
-  ) {
+  while (index < elements.length || oldFiber != null) {
     const element = elements[index];
     let newFiber: Fiber | undefined = undefined;
 
-    const sameType =
-      oldFiber &&
-      element &&
-      element.type === oldFiber.type;
+    const sameType = oldFiber && element && element.type === oldFiber.type;
 
     if (sameType) {
       // UPDATE
@@ -272,18 +288,18 @@ function reconcileChildren(wipFiber: Fiber, elements: MyReactElement[]) {
       };
     }
     if (element && !sameType) {
-      // ADD
+      // PLACEMENT
       newFiber = {
         type: element.type,
         props: element.props,
-        dom: undefined, // will be created
+        dom: undefined,
         parent: wipFiber,
         alternate: undefined,
         effectTag: "PLACEMENT",
       };
     }
     if (oldFiber && !sameType) {
-      // DELETE
+      // DELETION
       oldFiber.effectTag = "DELETION";
       deletions.push(oldFiber);
     }
@@ -303,39 +319,36 @@ function reconcileChildren(wipFiber: Fiber, elements: MyReactElement[]) {
   }
 }
 
-// 7. Hooks
+// --- 7. Hooks Implementation ---
+
 function useState<T>(initial: T): [T, (action: T | ((prev: T) => T)) => void] {
   const oldHook =
     wipFiber?.alternate &&
     wipFiber.alternate.hooks &&
     wipFiber.alternate.hooks[hookIndex];
 
-  const hook = {
+  const hook: Hook = {
+    tag: 'STATE',
     state: oldHook ? oldHook.state : initial,
     queue: [] as any[],
   };
 
   const actions = oldHook ? oldHook.queue : [];
-  actions.forEach((action: any) => {
-      // Handle functional updates
-      if (typeof action === 'function') {
-          hook.state = action(hook.state);
-      } else {
-          hook.state = action;
-      }
+  actions?.forEach((action: any) => {
+    hook.state = typeof action === 'function' ? action(hook.state) : action;
   });
 
   const setState = (action: any) => {
-    hook.queue.push(action);
-    // Restart render from root
+    hook.queue?.push(action);
+    // Trigger Re-render
     if (currentRoot) {
-        wipRoot = {
-            dom: currentRoot.dom,
-            props: currentRoot.props,
-            alternate: currentRoot,
-        };
-        nextUnitOfWork = wipRoot;
-        deletions = [];
+      wipRoot = {
+        dom: currentRoot.dom,
+        props: currentRoot.props,
+        alternate: currentRoot,
+      };
+      nextUnitOfWork = wipRoot;
+      deletions = [];
     }
   };
 
@@ -344,11 +357,38 @@ function useState<T>(initial: T): [T, (action: T | ((prev: T) => T)) => void] {
   return [hook.state, setState];
 }
 
-// Export the library
+function useEffect(callback: Function, deps?: any[]) {
+    const oldHook = 
+        wipFiber?.alternate &&
+        wipFiber.alternate.hooks &&
+        wipFiber.alternate.hooks[hookIndex];
+
+    const hasChanged = hasDepsChanged(oldHook ? oldHook.deps : undefined, deps);
+
+    const hook: Hook = {
+        tag: 'EFFECT',
+        callback: callback,
+        deps: deps,
+        cancel: oldHook?.cancel,
+        hasChanged: hasChanged
+    };
+
+    wipFiber?.hooks?.push(hook);
+    hookIndex++;
+}
+
+function hasDepsChanged(prevDeps?: any[], nextDeps?: any[]) {
+    if (!prevDeps || !nextDeps) return true;
+    if (prevDeps.length !== nextDeps.length) return true;
+    return nextDeps.some((dep, index) => dep !== prevDeps[index]);
+}
+
+// Export the engine
 const MyReact = {
   createElement,
   render,
   useState,
+  useEffect
 };
 
 export default MyReact;

@@ -15,6 +15,18 @@ export interface MyReactElement {
   };
 }
 
+export type HookType = 'STATE' | 'EFFECT';
+
+export interface Hook {
+  tag: HookType;
+  state?: any;        // For useState
+  queue?: any[];      // For useState updates
+  deps?: any[];       // For useEffect
+  cancel?: Function;  // For useEffect cleanup
+  callback?: Function;// For useEffect
+  hasChanged?: boolean; // Track if deps changed
+}
+
 export interface Fiber {
   type?: string | Function;
   props: {
@@ -27,5 +39,5 @@ export interface Fiber {
   sibling?: Fiber;
   alternate?: Fiber | null;
   effectTag?: 'PLACEMENT' | 'UPDATE' | 'DELETION';
-  hooks?: any[];
+  hooks?: Hook[];
 }

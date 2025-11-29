@@ -11,21 +11,11 @@ export const LESSONS: Lesson[] = [
     type,
     props: {
       ...props,
-      children: children.map(child =>
+      children: children.flat().map(child =>
         typeof child === "object"
           ? child
           : createTextElement(child)
       ),
-    },
-  };
-}
-
-function createTextElement(text) {
-  return {
-    type: "TEXT_ELEMENT",
-    props: {
-      nodeValue: text,
-      children: [],
     },
   };
 }`
@@ -50,7 +40,7 @@ function createTextElement(text) {
   {
     id: "workloop",
     title: "3. The Work Loop (Fiber)",
-    description: "To avoid blocking the main thread for large updates, React breaks the work into small units called 'Fibers'. We use `requestIdleCallback` to perform work only when the browser is idle. If the browser needs to paint a frame or handle input, it pauses our loop.",
+    description: "To avoid blocking the main thread for large updates, React breaks the work into small units called 'Fibers'. We use `requestIdleCallback` to perform work only when the browser is idle.",
     highlight: "workLoop",
     code: `function workLoop(deadline) {
   let shouldYield = false;
@@ -69,58 +59,66 @@ function createTextElement(text) {
   {
     id: "reconciliation",
     title: "4. Reconciliation & Diffing",
-    description: "Reconciliation is the process of comparing the new element tree with the old fiber tree. We check if the type is the same. If yes, we update props. If not, we replace. This determines the `effectTag` (PLACEMENT, UPDATE, DELETION).",
+    description: "Reconciliation is the process of comparing the new element tree with the old fiber tree. We check if the type is the same. If yes, we update props. If not, we replace. This determines the `effectTag`.",
     highlight: "reconcileChildren",
     code: `function reconcileChildren(wipFiber, elements) {
-  let index = 0;
-  let oldFiber = wipFiber.alternate && wipFiber.alternate.child;
-  
-  while (index < elements.length || oldFiber != null) {
-    const element = elements[index];
-    const sameType = oldFiber && element && element.type == oldFiber.type;
+  // ... loop over elements
+  const sameType = oldFiber && element && element.type == oldFiber.type;
 
-    if (sameType) {
-      // UPDATE: Keep DOM, update props
-    }
-    if (element && !sameType) {
-      // PLACEMENT: Add new node
-    }
-    if (oldFiber && !sameType) {
-      // DELETION: Remove node
-    }
-    // ... Move to next sibling
+  if (sameType) {
+    // UPDATE: Reuse DOM, update props
+  }
+  if (element && !sameType) {
+    // PLACEMENT: Create new DOM
+  }
+  if (oldFiber && !sameType) {
+    // DELETION: Remove DOM
   }
 }`
   },
   {
     id: "hooks",
-    title: "5. Hooks (useState)",
-    description: "Hooks allow functional components to have state. We store hooks in an array on the fiber. When a component re-renders, we access the hooks by index to retrieve the previous state.",
+    title: "5. Hooks: useState",
+    description: "Hooks rely on call order. We store them in a simple array on the fiber. `useState` checks if there is an existing hook at the current index. If so, it returns the state; otherwise, it initializes it.",
     highlight: "useState",
     code: `function useState(initial) {
-  const oldHook = 
-    wipFiber.alternate && 
-    wipFiber.alternate.hooks && 
-    wipFiber.alternate.hooks[hookIndex];
-
+  const oldHook = wipFiber.alternate.hooks[hookIndex];
   const hook = {
     state: oldHook ? oldHook.state : initial,
     queue: [],
   };
+  
+  // Apply queued updates...
+  
+  wipFiber.hooks.push(hook);
+  hookIndex++;
+  return [hook.state, setState];
+}`
+  },
+  {
+    id: "useeffect",
+    title: "6. Hooks: useEffect",
+    description: "useEffect schedules side effects. We compare the dependency array with the previous render. If dependencies change, we flag the hook. We execute these effects AFTER the DOM has been committed to the screen.",
+    highlight: "useEffect",
+    code: `function useEffect(callback, deps) {
+  const oldHook = wipFiber.alternate.hooks[hookIndex];
+  const hasChanged = hasDepsChanged(oldHook?.deps, deps);
 
-  // Run pending actions from queue
-  // ...
-
-  const setState = action => {
-    hook.queue.push(action);
-    // Trigger re-render from root
-    wipRoot = { ...currentRoot, alternate: currentRoot };
-    nextUnitOfWork = wipRoot;
+  const hook = {
+    tag: 'EFFECT',
+    callback,
+    deps,
+    hasChanged,
   };
 
   wipFiber.hooks.push(hook);
   hookIndex++;
-  return [hook.state, setState];
+}
+
+// In commitRoot...
+if (hook.hasChanged) {
+  hook.cancel && hook.cancel(); // Cleanup old
+  hook.cancel = hook.callback(); // Run new
 }`
   }
 ];
