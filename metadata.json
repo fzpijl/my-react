@@ -1,0 +1,5 @@
+{
+  "name": "MyReact - Deep Dive",
+  "description": "An interactive tutorial and implementation of a React clone to understand the core principles: Fiber, Virtual DOM, and Reconciliation.",
+  "requestFramePermissions": []
+}
